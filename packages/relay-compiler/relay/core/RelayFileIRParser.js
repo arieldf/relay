@@ -26,8 +26,10 @@ import type {FileFilter} from 'RelayCodegenWatcher';
 import type {DocumentNode} from 'graphql';
 
 // Throws an error if parsing the file fails
-function parseFile(baseDir: string, file: File): ?DocumentNode {
-  const text = fs.readFileSync(path.join(baseDir, file.relPath), 'utf8');
+function parseFile(baseDir: string, file: File, text: string): ?DocumentNode {
+  // const text = fs.readFileSync(path.join(baseDir, file.relPath), 'utf8');
+
+  const moduleName = path.basename(file.relPath, path.extname(file.relPath));
 
   invariant(
     text.indexOf('graphql') >= 0,
@@ -44,7 +46,7 @@ function parseFile(baseDir: string, file: File): ?DocumentNode {
   ).forEach(({tag, template}) => {
     if (!(tag === 'graphql' || tag === 'graphql.experimental')) {
       throw new Error(
-        `Invalid tag ${tag} in ${file.relPath}. ` +
+        `Invalid tag ${tag} in ${moduleName}. ` +
           'Expected graphql`` (common case) or ' +
           'graphql.experimental`` (if using experimental directives).',
       );
@@ -77,12 +79,54 @@ function parseFile(baseDir: string, file: File): ?DocumentNode {
   };
 }
 
-function getParser(baseDir: string): FileParser {
+type TransformFactory = (baseDir: string) => (filename: string, text: string) => string
+type TransformModule = { default: TransformFactory }
+
+function getParser(transformModules: Array<string> = []) {
+    return (baseDir: string): FileParser => {
+        const transformer = getTransformer(baseDir, transformModules)
+        return new FileParser({
+            baseDir,
+            parse: (baseDir, file) => {
+                const text = fs.readFileSync(path.join(baseDir, file.relPath), 'utf8');
+                return parseFile(baseDir, file, transformer(path.join(baseDir, file.relPath), text));
+            },
+        });
+    }
+}
+
+function getTransformer(baseDir: string, transformModules: Array<string> = []) {
+    let transformer = (filename: string, text: string) => text
+    if (transformModules.length) {
+        transformModules.forEach(moduleName => {
+            let moduleImpl: TransformFactory
+            try {
+                // $FlowFixMe flow doesn't know about __non_webpack_require__
+                moduleImpl = (__non_webpack_require__(moduleName): TransformFactory)
+                invariant(
+                    moduleImpl.default,
+                    'Transformer module "' + moduleName + '" should have a default export'
+                );
+            } catch (e) {
+                throw new Error(
+                    'Can not resolve transformer module "' + moduleName + '"'
+                );
+            }
+            const transformerImpl = moduleImpl.default(baseDir)
+            const prevTransformer = transformer
+            transformer = (filename: string, text: string) => transformerImpl(filename, prevTransformer(filename, text))
+        })
+    }
+
+    return transformer
+}
+
+/*function getParser(baseDir: string): FileParser {
   return new FileParser({
     baseDir,
     parse: parseFile,
   });
-}
+}*/
 
 function getFileFilter(baseDir: string): FileFilter {
   return (file: File) => {
